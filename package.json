@@ -1,0 +1,7 @@
+{
+  "name": "freedom-bank-local",
+  "private": true,
+  "scripts": {
+    "emul": "firebase --config ./firebase.json --project freedom-bank-9c209 emulators:start --only hosting,functions,firestore,auth"
+  }
+}

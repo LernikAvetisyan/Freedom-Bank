@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freedom Bank — Login</title>
+
+  <!-- Favicon -->
+   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="alternate icon" href="/favicon.ico"> <!-- optional fallback if you later add one -->
+<meta name="theme-color" content="#3b82f6">
+
+
+  <!-- Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap" rel="stylesheet" />
+
+  <!-- Styles + Tailwind runtime -->
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Firebase (compat) -->
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+
+  <!-- App scripts -->
+  <script defer src="./theme.js"></script>
+  <script defer src="./firebase-config.js"></script>
+  <script defer src="./auth.js"></script>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4 text-[var(--text-primary)]">
+  <!-- Theme toggle -->
+  <button id="themeToggle" onclick="toggleTheme()" class="btn btn-secondary !p-2 h-10 w-10 fixed top-4 right-4"></button>
+
+  <div class="glass shadow-medium rounded-xl p-8 w-full max-w-md">
+    <div class="text-center mb-8">
+      <h1 class="text-3xl font-bold text-[var(--accent-primary)]">🏦 Freedom Bank</h1>
+      <p class="text-[var(--text-secondary)] mt-2">Welcome back! Please sign in to your account.</p>
+    </div>
+
+    <div class="space-y-4">
+      <input id="email" type="email" placeholder="Email" autocomplete="username" class="input-field">
+      <input id="password" type="password" placeholder="Password" autocomplete="current-password" class="input-field">
+
+      <p id="loginError" class="error-text hidden"></p>
+
+      <div class="pt-2 space-y-3">
+        <button id="loginBtn" class="btn btn-primary w-full justify-center">Login</button>
+        <button id="signupBtn" class="btn btn-secondary w-full justify-center">Sign Up</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Signup Modal -->
+  <div id="signupModal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-card glass rounded-xl p-6 w-full max-w-md">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-bold">Create a new account</h2>
+        <button id="closeSignupBtn" class="p-1 rounded-full text-[var(--text-secondary)] hover:bg-[var(--border-color)]">
+          <!-- X icon -->
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"/></svg>
+        </button>
+      </div>
+
+      <div class="space-y-3">
+        <input id="suEmail" type="email" placeholder="Email" autocomplete="username" class="input-field">
+        <input id="suPassword" type="password" placeholder="Password (min 6 chars)" autocomplete="new-password" class="input-field">
+        <input id="suConfirm" type="password" placeholder="Confirm password" autocomplete="new-password" class="input-field">
+
+        <p id="signupError" class="error-text hidden"></p>
+
+        <div class="flex items-center justify-end gap-3 pt-4">
+          <button id="cancelSignupBtn" class="btn btn-secondary">Cancel</button>
+          <button id="createAccountBtn" class="btn btn-primary">Create account</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

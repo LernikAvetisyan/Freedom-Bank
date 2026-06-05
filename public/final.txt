@@ -1,0 +1,1639 @@
+/* eslint-disable no-console */
+const admin = require("firebase-admin")
+const { getFirestore, FieldValue } = require("firebase-admin/firestore")
+const { onRequest } = require("firebase-functions/v2/https")
+const { onSchedule } = require("firebase-functions/v2/scheduler")
+
+admin.initializeApp()
+const db = getFirestore()
+const auth = admin.auth()
+
+/* =========================================================
+   BUDGET-WISE LINK AUTH
+========================================================= */
+
+const FB_API_KEY =
+  process.env.FREEDOM_SERVER_API_KEY ||
+  process.env.FREEDOM_BANK_API_KEY ||
+  "AIzaSyBNvwwSZwiRiQJTSnnXQ5kY6JqkWQZNIlo"
+
+/* =========================================================
+   1) CONFIG
+========================================================= */
+
+const TIMEZONE = process.env.TIMEZONE || "America/Los_Angeles"
+const PLAN_TTL_DAYS = parseInt(process.env.PLAN_TTL_DAYS || "7", 10)
+
+/*
+  Live generation start date
+  Start from 2026-01-18 (LA time) and never generate earlier
+*/
+const LIVE_START_DATE = process.env.LIVE_START_DATE || "2026-01-15"
+
+/* Accounts */
+const ACCOUNT_TYPES = ["checking", "credit"]
+
+/* Biweekly cadence */
+const BIWEEKLY_DAYS = 14
+const BIWEEKLY_ANCHOR_DATE = process.env.BIWEEKLY_ANCHOR_DATE || "2025-01-03"
+
+/* Checking behavior */
+const STARTING_CHECKING_BALANCE = 6000
+const CHECKING_FLOOR = 100
+const CHECKING_SPEND_SWITCH = 2000
+const ATM_DEPOSIT_MIN = 500
+const ATM_DEPOSIT_MAX = 1000
+
+/* Salary rules (biweekly) */
+const SALARY_MIN_BAND = 3000
+const SALARY_MAX_BAND = 6000
+const SALARY_TIME_H = 9
+
+/* Credit payment rules (biweekly) */
+const CREDIT_PAYMENT_TIME_H = 12
+const CREDIT_TARGET_MIN = 3000
+const CREDIT_TARGET_MAX = 5000
+const CREDIT_PAY_PCT_IN_BAND = 0.03
+const CREDIT_PAY_PCT_LOW = 0.05
+
+/* Random minute and second guardrails (prevents :00) */
+const RAND_MIN_MINUTE = 3
+const RAND_MAX_MINUTE = 57
+const RAND_MIN_SECOND = 5
+const RAND_MAX_SECOND = 55
+
+/*
+  AUTO EXPENSE LOGIC (FINAL)
+  Exactly 4 AUTO expenses per day per account, planned once and executed when due:
+
+  00:00–05:59 (hours 00–05) exactly 1
+  06:00–11:59 (hours 06–11) exactly 1
+  12:00–17:59 (hours 12–17) exactly 1
+  18:00–23:59 (hours 18–23) exactly 1
+
+  The plan is visible in Firestore:
+  - users/{uid}/account/{acct}/plans/{YYYY-MM-DD}
+  - users/{uid}/dailyAutoPlan/{YYYY-MM-DD} (summary for console visibility)
+*/
+const AUTO_BLOCK_STARTS = [0, 6, 12, 18]
+const AUTO_BLOCK_HOURS = 6
+
+/* Checking month constraints (your requirement) */
+const MONTH_END_MIN_BAL = 3000
+const MONTH_NET_POSITIVE_MARGIN = 50
+
+/* API return cap */
+const API_MAX_RETURN = 50000
+const API_PAGE_SIZE = 1000
+
+/* =========================================================
+   2) TRANSACTION POOL
+========================================================= */
+
+const TRANSACTION_POOL = {
+  Groceries: [
+    { merchant: "Trader Joe's", min: 25, max: 150 },
+    { merchant: "Whole Foods Market", min: 40, max: 250 },
+    { merchant: "Costco", min: 100, max: 500 },
+    { merchant: "Safeway", min: 20, max: 180 },
+    { merchant: "Kroger", min: 20, max: 180 },
+    { merchant: "Albertsons", min: 20, max: 180 },
+    { merchant: "Aldi", min: 15, max: 120 },
+    { merchant: "Lidl", min: 15, max: 120 },
+    { merchant: "Walmart Supercenter", min: 20, max: 220 },
+    { merchant: "Target", min: 20, max: 180 },
+    { merchant: "H-E-B", min: 20, max: 180 },
+    { merchant: "Meijer", min: 20, max: 180 },
+    { merchant: "Publix", min: 25, max: 190 },
+    { merchant: "Ralphs", min: 20, max: 180 },
+    { merchant: "Vons", min: 20, max: 170 },
+    { merchant: "Food Lion", min: 15, max: 150 },
+    { merchant: "Giant Food", min: 20, max: 180 },
+    { merchant: "Wegmans", min: 30, max: 220 },
+    { merchant: "Sprouts Farmers Market", min: 20, max: 160 },
+    { merchant: "Fresh Thyme Market", min: 15, max: 140 },
+  ],
+  "Food & Dining": [
+    { merchant: "Starbucks", min: 5, max: 30 },
+    { merchant: "McDonald's", min: 8, max: 40 },
+    { merchant: "Chipotle", min: 12, max: 50 },
+    { merchant: "Subway", min: 8, max: 35 },
+    { merchant: "Chick-fil-A", min: 9, max: 40 },
+    { merchant: "Burger King", min: 8, max: 35 },
+    { merchant: "Taco Bell", min: 7, max: 30 },
+    { merchant: "KFC", min: 9, max: 35 },
+    { merchant: "Panda Express", min: 10, max: 45 },
+    { merchant: "Panera Bread", min: 10, max: 45 },
+    { merchant: "Dunkin'", min: 4, max: 25 },
+    { merchant: "Five Guys", min: 12, max: 55 },
+    { merchant: "Shake Shack", min: 12, max: 60 },
+    { merchant: "Domino's", min: 10, max: 45 },
+    { merchant: "Papa Johns", min: 10, max: 45 },
+    { merchant: "Pizza Hut", min: 10, max: 45 },
+    { merchant: "Olive Garden", min: 15, max: 80 },
+    { merchant: "The Cheesecake Factory", min: 20, max: 120 },
+    { merchant: "Buffalo Wild Wings", min: 15, max: 90 },
+    { merchant: "Neighborhood Cafe", min: 6, max: 35 },
+  ],
+  Transportation: [
+    { merchant: "Uber", min: 10, max: 75 },
+    { merchant: "Lyft", min: 10, max: 75 },
+    { merchant: "Shell", min: 30, max: 80 },
+    { merchant: "Chevron", min: 30, max: 80 },
+    { merchant: "Exxon", min: 30, max: 80 },
+    { merchant: "BP", min: 30, max: 80 },
+    { merchant: "Mobil", min: 30, max: 80 },
+    { merchant: "7-Eleven", min: 25, max: 70 },
+    { merchant: "Costco Gasoline", min: 25, max: 70 },
+    { merchant: "ARCO", min: 25, max: 70 },
+    { merchant: "Transit Fare", min: 2, max: 12 },
+    { merchant: "Transit Pass Reload", min: 5, max: 50 },
+    { merchant: "Parking", min: 5, max: 40 },
+    { merchant: "Toll Charges", min: 3, max: 20 },
+    { merchant: "Car Wash", min: 8, max: 35 },
+    { merchant: "Jiffy Lube", min: 40, max: 150 },
+    { merchant: "AutoZone", min: 10, max: 120 },
+    { merchant: "Advance Auto Parts", min: 10, max: 120 },
+    { merchant: "Enterprise Rent-A-Car", min: 40, max: 200 },
+    { merchant: "Hertz", min: 40, max: 220 },
+  ],
+  Subscriptions: [
+    { merchant: "Netflix", min: 10, max: 25 },
+    { merchant: "Spotify", min: 10, max: 18 },
+    { merchant: "YouTube Premium", min: 10, max: 20 },
+    { merchant: "Hulu", min: 8, max: 20 },
+    { merchant: "Disney+", min: 8, max: 20 },
+    { merchant: "Max", min: 10, max: 20 },
+    { merchant: "Paramount+", min: 8, max: 18 },
+    { merchant: "Peacock", min: 6, max: 16 },
+    { merchant: "Apple Music", min: 10, max: 18 },
+    { merchant: "iCloud+", min: 1, max: 10 },
+    { merchant: "Amazon Prime", min: 10, max: 18 },
+    { merchant: "Audible", min: 8, max: 18 },
+    { merchant: "Adobe Creative Cloud", min: 10, max: 60 },
+    { merchant: "Canva Pro", min: 8, max: 20 },
+    { merchant: "Notion", min: 4, max: 15 },
+    { merchant: "Evernote", min: 4, max: 15 },
+    { merchant: "Dropbox", min: 8, max: 25 },
+    { merchant: "Google One", min: 2, max: 20 },
+    { merchant: "Microsoft 365", min: 8, max: 25 },
+    { merchant: "GitHub", min: 4, max: 10 },
+  ],
+  Utilities: [
+    { merchant: "Electric Utility", min: 40, max: 220 },
+    { merchant: "Gas Utility", min: 20, max: 140 },
+    { merchant: "Water Utility", min: 20, max: 120 },
+    { merchant: "Trash Service", min: 15, max: 60 },
+    { merchant: "Sewer Service", min: 15, max: 80 },
+    { merchant: "Internet Service", min: 40, max: 120 },
+    { merchant: "Mobile Phone Service", min: 30, max: 120 },
+    { merchant: "Landline Service", min: 10, max: 40 },
+    { merchant: "Cable/Satellite TV", min: 30, max: 120 },
+    { merchant: "Solar Service", min: 20, max: 150 },
+    { merchant: "Home Security", min: 15, max: 70 },
+    { merchant: "Streaming Bundle", min: 15, max: 40 },
+    { merchant: "Cloud Storage", min: 2, max: 20 },
+    { merchant: "VPN Service", min: 3, max: 15 },
+    { merchant: "Domain Renewal", min: 10, max: 40 },
+    { merchant: "Web Hosting", min: 5, max: 25 },
+    { merchant: "EV Charging", min: 5, max: 40 },
+    { merchant: "Propane Refill", min: 10, max: 50 },
+    { merchant: "Smart Home Service", min: 5, max: 25 },
+    { merchant: "Device Protection Plan", min: 5, max: 20 },
+  ],
+  Entertainment: [
+    { merchant: "AMC Theatres", min: 12, max: 60 },
+    { merchant: "Regal Cinemas", min: 12, max: 60 },
+    { merchant: "IMAX", min: 15, max: 80 },
+    { merchant: "Fandango", min: 10, max: 60 },
+    { merchant: "Concert Tickets", min: 25, max: 200 },
+    { merchant: "Live Nation", min: 25, max: 250 },
+    { merchant: "Bowling", min: 10, max: 70 },
+    { merchant: "Mini Golf", min: 8, max: 40 },
+    { merchant: "Arcade", min: 5, max: 50 },
+    { merchant: "Escape Room", min: 20, max: 150 },
+    { merchant: "Museum Admission", min: 10, max: 50 },
+    { merchant: "Zoo Admission", min: 10, max: 70 },
+    { merchant: "Theme Park Tickets", min: 50, max: 250 },
+    { merchant: "Sporting Event Tickets", min: 25, max: 300 },
+    { merchant: "Karaoke", min: 15, max: 90 },
+    { merchant: "Performing Arts Tickets", min: 20, max: 200 },
+    { merchant: "Comedy Show", min: 15, max: 120 },
+    { merchant: "Bookstore", min: 8, max: 120 },
+    { merchant: "Record Store", min: 10, max: 120 },
+    { merchant: "Game Store", min: 10, max: 120 },
+  ],
+  Shopping: [
+    { merchant: "Amazon", min: 5, max: 400 },
+    { merchant: "Target", min: 10, max: 300 },
+    { merchant: "Walmart", min: 10, max: 300 },
+    { merchant: "Best Buy", min: 10, max: 550 },
+    { merchant: "IKEA", min: 20, max: 600 },
+    { merchant: "Home Depot", min: 10, max: 420 },
+    { merchant: "Lowe's", min: 10, max: 320 },
+    { merchant: "Macy's", min: 10, max: 400 },
+    { merchant: "Nordstrom", min: 20, max: 800 },
+    { merchant: "Sephora", min: 10, max: 300 },
+    { merchant: "Ulta Beauty", min: 10, max: 300 },
+    { merchant: "Nike", min: 10, max: 400 },
+    { merchant: "Adidas", min: 10, max: 400 },
+    { merchant: "H&M", min: 10, max: 300 },
+    { merchant: "Zara", min: 10, max: 300 },
+    { merchant: "Apple Store", min: 20, max: 550 },
+    { merchant: "Google Store", min: 20, max: 350 },
+    { merchant: "Etsy", min: 5, max: 350 },
+    { merchant: "eBay", min: 5, max: 500 },
+    { merchant: "Cost Plus World Market", min: 10, max: 250 },
+  ],
+}
+
+const CATEGORIES = Object.keys(TRANSACTION_POOL)
+if (!CATEGORIES.length) throw new Error("TRANSACTION_POOL is empty")
+
+/* =========================================================
+   3) SIMPLE UTILS
+========================================================= */
+
+function round2(n) {
+  return Number(Number(n || 0).toFixed(2))
+}
+
+function randBetween(min, max) {
+  const lo = Number(min)
+  const hi = Number(max)
+  if (!(hi > lo)) return lo
+  return lo + Math.random() * (hi - lo)
+}
+
+function pick(a) {
+  return a[Math.floor(Math.random() * a.length)]
+}
+
+function randomAmount(info) {
+  const v = Math.random() * (info.max - info.min) + info.min
+  return Number(v.toFixed(2))
+}
+
+function randomDigits(n) {
+  let s = ""
+  for (let i = 0; i < n; i++) s += Math.floor(Math.random() * 10)
+  return s
+}
+
+function makeCVV() {
+  return ("000" + Math.floor(Math.random() * 1000)).slice(-3)
+}
+
+function makeExpiry() {
+  const now = new Date()
+  const yearsOut = 2 + Math.floor(Math.random() * 4)
+  const expDate = new Date(now.getFullYear() + yearsOut, Math.floor(Math.random() * 12), 1)
+  const mm = ("0" + (expDate.getMonth() + 1)).slice(-2)
+  const yy = String(expDate.getFullYear()).slice(2)
+  return `${mm}/${yy}`
+}
+
+function pad2(n) {
+  return ("0" + Number(n)).slice(-2)
+}
+
+/* =========================================================
+   4) LA TIME HELPERS
+========================================================= */
+
+function laParts(d = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(d)
+
+  const y = Number(parts.find((p) => p.type === "year")?.value || "1970")
+  const mo = Number(parts.find((p) => p.type === "month")?.value || "01")
+  const da = Number(parts.find((p) => p.type === "day")?.value || "01")
+  const hh = Number(parts.find((p) => p.type === "hour")?.value || "0")
+  const mm = Number(parts.find((p) => p.type === "minute")?.value || "0")
+  const ss = Number(parts.find((p) => p.type === "second")?.value || "0")
+
+  const dateStr = `${y}-${pad2(mo)}-${pad2(da)}`
+  return { y, mo, da, hh, mm, ss, dateStr }
+}
+
+function laDateKey(d = new Date()) {
+  return laParts(d).dateStr
+}
+
+function parseDateKey(dk) {
+  const m = String(dk || "").match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return null
+  return { y: Number(m[1]), mo: Number(m[2]) - 1, d: Number(m[3]) }
+}
+
+function dateKeyToDayNumber(dateStr) {
+  const p = parseDateKey(dateStr)
+  if (!p) return NaN
+  return Math.floor(Date.UTC(p.y, p.mo, p.d) / 86_400_000)
+}
+
+function dayNumberToDateKey(dayNum) {
+  const ms = Number(dayNum) * 86_400_000
+  const d = new Date(ms)
+  const y = d.getUTCFullYear()
+  const m = pad2(d.getUTCMonth() + 1)
+  const da = pad2(d.getUTCDate())
+  return `${y}-${m}-${da}`
+}
+
+function addDays(dateStr, days) {
+  const dn = dateKeyToDayNumber(dateStr)
+  if (!Number.isFinite(dn)) return ""
+  return dayNumberToDateKey(dn + Number(days || 0))
+}
+
+function monthKeyFromDateStr(dateStr) {
+  const p = String(dateStr || "").match(/^(\d{4})-(\d{2})-\d{2}$/)
+  return p ? `${p[1]}-${p[2]}` : ""
+}
+
+function isLastDayOfMonth(dateStr) {
+  const p = parseDateKey(dateStr)
+  if (!p) return false
+  const next = new Date(Date.UTC(p.y, p.mo, p.d) + 86_400_000)
+  const ny = next.getUTCFullYear()
+  const nmo = next.getUTCMonth()
+  return ny !== p.y || nmo !== p.mo
+}
+
+function isBiweeklyDate(dateStr) {
+  const a = dateKeyToDayNumber(BIWEEKLY_ANCHOR_DATE)
+  const b = dateKeyToDayNumber(dateStr)
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false
+  const diff = b - a
+  return diff >= 0 && diff % BIWEEKLY_DAYS === 0
+}
+
+/*
+  Make an LA wall-clock timestamp at (y,m,d,hh:00) without drift issues.
+  Used only as an anchor.
+*/
+function makeLaWallClockDate(y, m, d, hh) {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  })
+
+  const desiredKey = `${y}-${pad2(m + 1)}-${pad2(d)}`
+  const desiredMin = hh * 60
+  let ts = new Date(Date.UTC(y, m, d, hh, 0, 0, 0))
+
+  for (let i = 0; i < 10; i++) {
+    const parts = fmt.formatToParts(ts)
+
+    let py = Number(parts.find((p) => p.type === "year")?.value || String(y))
+    let pmo = Number(parts.find((p) => p.type === "month")?.value || pad2(m + 1)) - 1
+    let pd = Number(parts.find((p) => p.type === "day")?.value || pad2(d))
+    let ph = Number(parts.find((p) => p.type === "hour")?.value || String(hh))
+    const pm = Number(parts.find((p) => p.type === "minute")?.value || "0")
+
+    if (ph === 24) {
+      ph = 0
+      const next = new Date(Date.UTC(py, pmo, pd) + 86_400_000)
+      py = next.getUTCFullYear()
+      pmo = next.getUTCMonth()
+      pd = next.getUTCDate()
+    }
+
+    const seenKey = `${py}-${pad2(pmo + 1)}-${pad2(pd)}`
+    const dayDelta = dateKeyToDayNumber(desiredKey) - dateKeyToDayNumber(seenKey)
+    const seenMin = ph * 60 + pm
+    const deltaMin = dayDelta * 1440 + (desiredMin - seenMin)
+
+    if (deltaMin === 0 && py === y && pmo === m && pd === d && ph === hh) return ts
+    ts = new Date(ts.getTime() + deltaMin * 60_000)
+  }
+
+  return ts
+}
+
+/* =========================================================
+   5) RANDOM TIMESTAMP GENERATION
+========================================================= */
+
+/*
+  Pick a safe timestamp inside the hour.
+  Guarantees minute and second are not 00.
+  If maxTs clamps this hour too early, returns null.
+*/
+function tryRandomTsInHour(dateStr, hour, maxTs) {
+  const p = parseDateKey(dateStr)
+  if (!p) return null
+
+  const start = makeLaWallClockDate(p.y, p.mo, p.d, hour)
+
+  let hardEnd = new Date(start.getTime() + 60 * 60 * 1000 - 1000)
+  if (maxTs instanceof Date && Number.isFinite(maxTs.getTime()) && hardEnd.getTime() > maxTs.getTime()) {
+    hardEnd = maxTs
+  }
+
+  if (hardEnd.getTime() <= start.getTime()) return null
+
+  if (maxTs instanceof Date && Number.isFinite(maxTs.getTime())) {
+    const maxLocal = laParts(maxTs)
+    const sameDay = maxLocal.dateStr === dateStr
+    const sameHour = sameDay && maxLocal.hh === hour
+    if (sameHour) {
+      const latestMinute = Math.min(RAND_MAX_MINUTE, maxLocal.mm)
+      const earliestMinute = RAND_MIN_MINUTE
+      if (latestMinute < earliestMinute) return null
+      if (maxLocal.mm <= RAND_MIN_MINUTE && maxLocal.ss <= RAND_MIN_SECOND) return null
+    }
+  }
+
+  const makeOne = () => {
+    const mm = RAND_MIN_MINUTE + Math.floor(Math.random() * (RAND_MAX_MINUTE - RAND_MIN_MINUTE + 1))
+    const ss = RAND_MIN_SECOND + Math.floor(Math.random() * (RAND_MAX_SECOND - RAND_MIN_SECOND + 1))
+    return new Date(start.getTime() + (mm * 60 + ss) * 1000)
+  }
+
+  for (let i = 0; i < 40; i++) {
+    const ts = makeOne()
+    if (ts.getTime() > hardEnd.getTime()) continue
+
+    const lp = laParts(ts)
+    if (lp.dateStr !== dateStr) continue
+    if (lp.hh !== hour) continue
+
+    return ts
+  }
+
+  return null
+}
+
+/*
+  Pick a safe timestamp inside a 6-hour block [startHour, endHourExclusive).
+  If maxTs is provided, the timestamp must not exceed maxTs.
+  Guarantees:
+  - hour is inside the block
+  - minute is not 00 (03..57)
+  - second is not 00 (05..55)
+*/
+function tryRandomTsInBlock(dateStr, startHour, endHourExclusive, maxTs) {
+  const p = parseDateKey(dateStr)
+  if (!p) return null
+
+  const start = makeLaWallClockDate(p.y, p.mo, p.d, startHour)
+
+  const endAnchor = (() => {
+    if (endHourExclusive < 24) return makeLaWallClockDate(p.y, p.mo, p.d, endHourExclusive)
+    const nextDateStr = addDays(dateStr, 1)
+    const np = parseDateKey(nextDateStr)
+    if (!np) return null
+    return makeLaWallClockDate(np.y, np.mo, np.d, 0)
+  })()
+  if (!endAnchor) return null
+
+  let hardEnd = new Date(endAnchor.getTime() - 1000)
+  if (maxTs instanceof Date && Number.isFinite(maxTs.getTime()) && hardEnd.getTime() > maxTs.getTime()) {
+    hardEnd = maxTs
+  }
+
+  if (hardEnd.getTime() <= start.getTime()) return null
+
+  const spanHours = endHourExclusive - startHour
+
+  const makeOne = () => {
+    const hOff = Math.floor(Math.random() * spanHours)
+    const hh = startHour + hOff
+    const mm = RAND_MIN_MINUTE + Math.floor(Math.random() * (RAND_MAX_MINUTE - RAND_MIN_MINUTE + 1))
+    const ss = RAND_MIN_SECOND + Math.floor(Math.random() * (RAND_MAX_SECOND - RAND_MIN_SECOND + 1))
+    const anchor = makeLaWallClockDate(p.y, p.mo, p.d, hh)
+    return new Date(anchor.getTime() + (mm * 60 + ss) * 1000)
+  }
+
+  for (let i = 0; i < 80; i++) {
+    const ts = makeOne()
+    if (ts.getTime() > hardEnd.getTime()) continue
+
+    const lp = laParts(ts)
+    if (lp.dateStr !== dateStr) continue
+    if (lp.hh < startHour) continue
+    if (lp.hh >= endHourExclusive) continue
+    if (lp.mm < RAND_MIN_MINUTE || lp.mm > RAND_MAX_MINUTE) continue
+    if (lp.ss < RAND_MIN_SECOND || lp.ss > RAND_MAX_SECOND) continue
+
+    return ts
+  }
+
+  return null
+}
+
+/* =========================================================
+   6) ACCOUNT HELPERS
+========================================================= */
+
+function normalizeAccount(acctRaw) {
+  const a = String(acctRaw || "").toLowerCase()
+  if (ACCOUNT_TYPES.includes(a)) return a
+  if (a === "main") return "checking"
+  return "checking"
+}
+
+function getAccountRef(uid, acctRaw) {
+  const acct = normalizeAccount(acctRaw)
+  return db.collection("users").doc(uid).collection("account").doc(acct)
+}
+
+/*
+  We keep these fields for backward compatibility.
+*/
+async function ensureUserDoc(uid) {
+  const userRef = db.collection("users").doc(uid)
+  const snap = await userRef.get()
+
+  if (!snap.exists) {
+    await userRef.set(
+      {
+        createdAt: FieldValue.serverTimestamp(),
+        linkedToBudgetWiseAI: false,
+        ledgerBackfillDone: false,
+      },
+      { merge: true }
+    )
+    return userRef.get()
+  }
+
+  const d = snap.data() || {}
+  if (typeof d.ledgerBackfillDone !== "boolean") await userRef.set({ ledgerBackfillDone: false }, { merge: true })
+  if (typeof d.linkedToBudgetWiseAI !== "boolean") await userRef.set({ linkedToBudgetWiseAI: false }, { merge: true })
+  return userRef.get()
+}
+
+async function ensureAccount(accountRef) {
+  const acct = normalizeAccount(accountRef.id)
+  const snap = await accountRef.get()
+
+  if (snap.exists) {
+    const d = snap.data() || {}
+    if (typeof d.currentBalance !== "number") await accountRef.set({ currentBalance: 0 }, { merge: true })
+    if (typeof d.backfillInitialized !== "boolean") await accountRef.set({ backfillInitialized: false }, { merge: true })
+    return accountRef.get()
+  }
+
+  await accountRef.set({
+    accountNumber: randomDigits(16),
+    cvv: makeCVV(),
+    expiry: makeExpiry(),
+    createdAt: FieldValue.serverTimestamp(),
+    accountType: acct,
+    currentBalance: 0,
+    backfillInitialized: false,
+    lastCadenceDay: null,
+  })
+
+  return accountRef.get()
+}
+
+/*
+  Per-day plan doc for each account:
+  users/{uid}/account/{acct}/plans/{YYYY-MM-DD}
+
+  Final structure:
+  - hours: [0,6,12,18]
+  - planned: { "0": Timestamp, "6": Timestamp, "12": Timestamp, "18": Timestamp }
+  - doneHours: [ ... ]
+*/
+function planRef(accountRef, dateStr) {
+  return accountRef.collection("plans").doc(String(dateStr))
+}
+
+function ttlDateFromNow(days) {
+  const ms = Math.max(1, Number(days || 1)) * 86_400_000
+  return new Date(Date.now() + ms)
+}
+
+
+/*
+  Ensure there is a stable planned timestamp for each block.
+  This never re-rolls existing planned times.
+*/
+async function ensureDailyPlan(accountRef, dateStr) {
+  const pref = planRef(accountRef, dateStr)
+  const snap = await pref.get()
+
+  const requiredHours = AUTO_BLOCK_STARTS.slice()
+  const requiredKeys = requiredHours.map((h) => String(h))
+  const expiresAt = ttlDateFromNow(PLAN_TTL_DAYS)
+
+  const fallbackTsInBlock = (b) => {
+    const p = parseDateKey(dateStr)
+    if (!p) return null
+    const end = b + AUTO_BLOCK_HOURS
+    const span = end - b
+    const hh = b + Math.floor(Math.random() * span)
+    const mm = RAND_MIN_MINUTE + Math.floor(Math.random() * (RAND_MAX_MINUTE - RAND_MIN_MINUTE + 1))
+    const ss = RAND_MIN_SECOND + Math.floor(Math.random() * (RAND_MAX_SECOND - RAND_MIN_SECOND + 1))
+    const anchor = makeLaWallClockDate(p.y, p.mo, p.d, hh)
+    return new Date(anchor.getTime() + (mm * 60 + ss) * 1000)
+  }
+
+  const fillPlanned = (plannedIn) => {
+    const out = {}
+    for (const k of requiredKeys) {
+      const v = plannedIn && plannedIn[k]
+      if (v) out[k] = v
+    }
+
+    for (const b of requiredHours) {
+      const k = String(b)
+      if (out[k]) continue
+
+      const end = b + AUTO_BLOCK_HOURS
+      let ts = tryRandomTsInBlock(dateStr, b, end, null)
+      if (!ts) ts = fallbackTsInBlock(b)
+      if (ts) out[k] = ts
+    }
+
+    return out
+  }
+
+  if (snap.exists) {
+    const d = snap.data() || {}
+
+    const plannedOut = fillPlanned(d.planned && typeof d.planned === "object" ? d.planned : null)
+
+    const doneIn = Array.isArray(d.doneHours) ? d.doneHours : []
+    const doneOut = doneIn.filter((h) => requiredHours.includes(h)).sort((a, b) => a - b)
+
+    const hoursOut = requiredHours.slice()
+
+    await pref.set(
+      {
+        date: dateStr,
+        hours: hoursOut,
+        count: hoursOut.length,
+        planned: plannedOut,
+        doneHours: doneOut,
+        expiresAt: d.expiresAt || expiresAt,
+        createdAt: d.createdAt || FieldValue.serverTimestamp(),
+        completedAt: d.completedAt || null,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+
+    const upgraded = await pref.get()
+    return upgraded.data() || {}
+  }
+
+  const planned = fillPlanned(null)
+
+  const plan = {
+    date: dateStr,
+    count: requiredHours.length,
+    hours: requiredHours,
+    planned,
+    doneHours: [],
+    expiresAt,
+    createdAt: FieldValue.serverTimestamp(),
+    completedAt: null,
+  }
+
+  await pref.set(plan, { merge: true })
+  return plan
+}
+
+
+async function markHourDone(accountRef, dateStr, hour) {
+  const pref = planRef(accountRef, dateStr)
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(pref)
+    if (!snap.exists) return
+    const d = snap.data() || {}
+    const done = Array.isArray(d.doneHours) ? d.doneHours.slice() : []
+    if (done.includes(hour)) return
+    done.push(hour)
+    done.sort((a, b) => a - b)
+    const all = Array.isArray(d.hours) ? d.hours : []
+    const isComplete = all.length > 0 && done.length >= all.length
+    tx.set(
+      pref,
+      {
+        doneHours: done,
+        completedAt: isComplete ? FieldValue.serverTimestamp() : null,
+      },
+      { merge: true }
+    )
+  })
+}
+
+/* =========================================================
+   6.25) DAILY PLAN SUMMARY (FOR FIREBASE CONSOLE)
+   You can open this doc to see future planned timestamps:
+
+   users/{uid}/dailyAutoPlan/{YYYY-MM-DD}
+========================================================= */
+
+function dailyAutoPlanRef(uid, dateStr) {
+  return db.collection("users").doc(uid).collection("dailyAutoPlan").doc(String(dateStr))
+}
+
+function toDateMaybe(v) {
+  if (!v) return null
+  if (v instanceof Date) return v
+  if (typeof v.toDate === "function") return v.toDate()
+  const d = new Date(v)
+  return Number.isFinite(d.getTime()) ? d : null
+}
+
+async function syncDailyAutoPlanSummary(uid, dateStr, checkingPlan, creditPlan) {
+  const ref = dailyAutoPlanRef(uid, dateStr)
+  const hours = AUTO_BLOCK_STARTS.slice()
+  const expiresAt = ttlDateFromNow(PLAN_TTL_DAYS)
+
+  const nextDoc = {
+    date: dateStr,
+    timeZone: TIMEZONE,
+    blocks: hours,
+    checking: { planned: {}, doneHours: Array.isArray(checkingPlan.doneHours) ? checkingPlan.doneHours : [] },
+    credit: { planned: {}, doneHours: Array.isArray(creditPlan.doneHours) ? creditPlan.doneHours : [] },
+  }
+
+  const msFields = {}
+
+  for (const b of hours) {
+    const k = String(b)
+    const chkTs = toDateMaybe(checkingPlan.planned && checkingPlan.planned[k])
+    const crTs = toDateMaybe(creditPlan.planned && creditPlan.planned[k])
+
+    if (chkTs) {
+      nextDoc.checking.planned[k] = chkTs
+      msFields[`checking_ms_${pad2(b)}`] = chkTs.getTime()
+      nextDoc[`checking_${pad2(b)}`] = chkTs
+    }
+
+    if (crTs) {
+      nextDoc.credit.planned[k] = crTs
+      msFields[`credit_ms_${pad2(b)}`] = crTs.getTime()
+      nextDoc[`credit_${pad2(b)}`] = crTs
+    }
+  }
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref)
+
+    if (!snap.exists) {
+      tx.set(
+        ref,
+        {
+          ...nextDoc,
+          ...msFields,
+          expiresAt,
+          createdAt: FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      )
+      return
+    }
+
+    const cur = snap.data() || {}
+    let changed = false
+
+    for (const b of hours) {
+      const ck = `checking_ms_${pad2(b)}`
+      const rk = `credit_ms_${pad2(b)}`
+      if (Number(cur[ck] || 0) !== Number(msFields[ck] || 0)) changed = true
+      if (Number(cur[rk] || 0) !== Number(msFields[rk] || 0)) changed = true
+    }
+
+    const curChkDone = Array.isArray(cur.checking && cur.checking.doneHours) ? cur.checking.doneHours : []
+    const curCrDone = Array.isArray(cur.credit && cur.credit.doneHours) ? cur.credit.doneHours : []
+    const nextChkDone = nextDoc.checking.doneHours
+    const nextCrDone = nextDoc.credit.doneHours
+
+    if (JSON.stringify(curChkDone) !== JSON.stringify(nextChkDone)) changed = true
+    if (JSON.stringify(curCrDone) !== JSON.stringify(nextCrDone)) changed = true
+
+    if (!cur.expiresAt) changed = true
+
+    if (!changed) return
+
+    tx.set(
+      ref,
+      {
+        ...nextDoc,
+        ...msFields,
+        expiresAt: cur.expiresAt || expiresAt,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+  })
+}
+
+
+/* =========================================================
+   6.5) AUTO BLOCK LOCK
+   Hard guarantee:
+   - only one AUTO expense per 6-hour block per account
+   Path:
+   users/{uid}/account/{acct}/hourLocks/{YYYY-MM-DD_BB}
+   Where BB is the block start hour (00,06,12,18)
+========================================================= */
+
+function hourLockRef(accountRef, dateStr, blockStartHour) {
+  return accountRef.collection("hourLocks").doc(`${dateStr}_${pad2(blockStartHour)}`)
+}
+
+async function reserveHourLock(accountRef, dateStr, blockStartHour) {
+  const ref = hourLockRef(accountRef, dateStr, blockStartHour)
+  const expiresAt = ttlDateFromNow(PLAN_TTL_DAYS)
+
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref)
+    if (snap.exists) return { ok: false, already: true }
+    tx.set(
+      ref,
+      {
+        date: dateStr,
+        hour: blockStartHour,
+        expiresAt,
+        createdAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    )
+    return { ok: true }
+  })
+}
+
+
+/* =========================================================
+   7) ATOMIC LEDGER WRITE
+========================================================= */
+
+function signedAmountForType(type, rawAbsAmount) {
+  const abs = Math.abs(Number(rawAbsAmount || 0))
+  const t = String(type || "").toLowerCase()
+  if (t !== "income" && t !== "expense") throw new Error(`Only income/expense allowed. Got: ${type}`)
+  if (t === "income") return -abs
+  return abs
+}
+
+async function makeTransaction(accountRef, source, opts) {
+  const type = String(opts.type || "").toLowerCase()
+  if (type !== "income" && type !== "expense") throw new Error(`Only income/expense allowed. Got: ${type}`)
+
+  const merchant = String(opts.merchant || "").trim()
+  const category = String(opts.category || "").trim()
+  if (!merchant) throw new Error("merchant is required")
+  if (!category) throw new Error("category is required")
+  if (String(category).toLowerCase() === "income" || String(category).toLowerCase() === "expense") {
+    throw new Error("category must not be Income or Expense")
+  }
+
+  let ts = opts.timestamp instanceof Date ? opts.timestamp : new Date()
+
+  const now = new Date()
+  if (ts.getTime() > now.getTime()) ts = now
+
+  const amount = signedAmountForType(type, opts.amount)
+
+  const id = opts.id ? String(opts.id) : `sim_${Date.now()}_${Math.floor(Math.random() * 10000)}`
+  const txRef = accountRef.collection("transactions").doc(id)
+  const acct = normalizeAccount(accountRef.id)
+
+  return db.runTransaction(async (tx) => {
+    const existing = await tx.get(txRef)
+    if (existing.exists) return { created: false }
+
+    const accSnap = await tx.get(accountRef)
+    const cur = Number((accSnap.data() || {}).currentBalance || 0)
+
+    const txn = {
+      id,
+      merchant,
+      category,
+      amount: Number(Number(amount).toFixed(2)),
+      type,
+      source: String(source || "system"),
+      timestamp: ts,
+      date: laDateKey(ts),
+    }
+
+    let next = round2(cur - txn.amount)
+
+    if (acct === "checking" && next < 0) throw new Error("checking_balance_would_go_negative")
+    if (acct === "credit" && next > 0) next = 0
+
+    tx.set(txRef, txn)
+    tx.set(accountRef, { currentBalance: next, lastTxnAt: FieldValue.serverTimestamp() }, { merge: true })
+    return { created: true }
+  })
+}
+
+/* =========================================================
+   8) CHECKING RULES
+========================================================= */
+
+async function ensureCheckingStart(uid, startTs) {
+  const checkingRef = getAccountRef(uid, "checking")
+  await ensureAccount(checkingRef)
+
+  const id = "start_checking_6000"
+  const txRef = checkingRef.collection("transactions").doc(id)
+  const ex = await txRef.get()
+  if (ex.exists) return
+
+  const any = await checkingRef.collection("transactions").limit(1).get()
+  if (!any.empty) return
+
+  await makeTransaction(checkingRef, "system", {
+    id,
+    type: "income",
+    merchant: "Starting Balance",
+    category: "Cash Deposit",
+    amount: STARTING_CHECKING_BALANCE,
+    timestamp: startTs,
+  })
+}
+
+async function ensureCreditStart(uid) {
+  const creditRef = getAccountRef(uid, "credit")
+  await ensureAccount(creditRef)
+}
+
+async function ensureCheckingFloorOrAtmDeposit(uid, expenseAbs, ts, expenseIdForIdempotency) {
+  const checkingRef = getAccountRef(uid, "checking")
+  await ensureAccount(checkingRef)
+
+  const snap = await checkingRef.get()
+  const bal = Number((snap.data() || {}).currentBalance || 0)
+  const exp = Math.abs(Number(expenseAbs || 0))
+  if (!(exp > 0)) return { ok: true }
+
+  if (bal - exp > CHECKING_FLOOR) return { ok: true }
+
+  const room = Math.max(0, SALARY_MAX_BAND - bal)
+  if (room <= 0) return { ok: false }
+
+  const dep = round2(Math.min(randBetween(ATM_DEPOSIT_MIN, ATM_DEPOSIT_MAX), room))
+  if (!(dep > 0)) return { ok: false }
+
+  const dateStr = laDateKey(ts)
+  const depId = `atm_${dateStr}_${String(expenseIdForIdempotency || "x")}`
+
+  const depTs = new Date(Math.max(0, ts.getTime() - 60_000))
+
+  await makeTransaction(checkingRef, "system", {
+    id: depId,
+    type: "income",
+    merchant: "ATM Deposit",
+    category: "Cash Deposit",
+    amount: dep,
+    timestamp: depTs,
+  })
+
+  return { ok: true }
+}
+
+async function createCheckingExpense(uid, ts, deterministicSuffix, source) {
+  const checkingRef = getAccountRef(uid, "checking")
+  await ensureAccount(checkingRef)
+
+  const snap = await checkingRef.get()
+  const bal = Number((snap.data() || {}).currentBalance || 0)
+
+  const cat = pick(CATEGORIES)
+  const info = pick(TRANSACTION_POOL[cat])
+
+  let exp = randomAmount(info)
+  if (bal > CHECKING_SPEND_SWITCH) exp = round2(exp * randBetween(1.05, 1.8))
+  else exp = round2(exp * randBetween(0.2, 0.6))
+
+  const expenseId = `chk_${laDateKey(ts)}_${String(deterministicSuffix)}`
+  const ok = await ensureCheckingFloorOrAtmDeposit(uid, exp, ts, expenseId)
+  if (!ok.ok) return null
+
+  const txnId = `exp_${expenseId}`
+  const t = await makeTransaction(checkingRef, source || "system", {
+    id: txnId,
+    type: "expense",
+    merchant: info.merchant,
+    category: cat,
+    amount: exp,
+    timestamp: ts,
+  })
+
+  return t && t.created ? { created: true } : null
+}
+
+async function applyBiweeklySalary(uid, dateStr, ts) {
+  if (!isBiweeklyDate(dateStr)) return null
+
+  const checkingRef = getAccountRef(uid, "checking")
+  await ensureAccount(checkingRef)
+
+  const id = `salary_${dateStr}`
+  const existing = await checkingRef.collection("transactions").doc(id).get()
+  if (existing.exists) return null
+
+  const snap = await checkingRef.get()
+  const bal = Number((snap.data() || {}).currentBalance || 0)
+
+  const topupMin = Math.max(0, SALARY_MIN_BAND - bal)
+  const topupMax = Math.max(0, SALARY_MAX_BAND - bal)
+  if (topupMax <= 0) return null
+
+  const amt = round2(randBetween(topupMin, topupMax))
+  if (!(amt > 0)) return null
+
+  return makeTransaction(checkingRef, "system", {
+    id,
+    type: "income",
+    merchant: "Salary",
+    category: "Payroll",
+    amount: amt,
+    timestamp: ts,
+  })
+}
+
+/* =========================================================
+   9) CREDIT RULES
+========================================================= */
+
+async function createCreditExpense(uid, ts, deterministicSuffix, source) {
+  const creditRef = getAccountRef(uid, "credit")
+  await ensureAccount(creditRef)
+
+  const cat = pick(CATEGORIES)
+  const info = pick(TRANSACTION_POOL[cat])
+  const exp = randomAmount(info)
+
+  const txnId = `cc_${laDateKey(ts)}_${String(deterministicSuffix)}`
+  return makeTransaction(creditRef, source || "system", {
+    id: txnId,
+    type: "expense",
+    merchant: info.merchant,
+    category: cat,
+    amount: exp,
+    timestamp: ts,
+  })
+}
+
+
+async function applyBiweeklyCreditPayment(uid, dateStr, ts) {
+  if (!isBiweeklyDate(dateStr)) return null
+
+  const creditRef = getAccountRef(uid, "credit")
+  await ensureAccount(creditRef)
+
+  const id = `ccpay_${dateStr}`
+  const existing = await creditRef.collection("transactions").doc(id).get()
+  if (existing.exists) return null
+
+  const snap = await creditRef.get()
+  const bal = Number((snap.data() || {}).currentBalance || 0)
+  const debt = Math.abs(Math.min(0, bal))
+  if (!(debt > 0)) return null
+
+  let payAbs = 0
+  if (debt > CREDIT_TARGET_MAX) {
+    const targetDebt = round2(randBetween(CREDIT_TARGET_MIN, CREDIT_TARGET_MAX))
+    payAbs = round2(debt - targetDebt)
+  } else if (debt >= CREDIT_TARGET_MIN) {
+    payAbs = round2(debt * CREDIT_PAY_PCT_IN_BAND)
+  } else {
+    payAbs = round2(debt * CREDIT_PAY_PCT_LOW)
+  }
+
+  if (!(payAbs > 0)) return null
+
+  if (payAbs >= debt) {
+    const leave = 0.01
+    payAbs = round2(Math.max(0, debt - leave))
+  }
+  if (!(payAbs > 0) || payAbs >= debt) return null
+
+  return makeTransaction(creditRef, "system", {
+    id,
+    type: "income",
+    merchant: "Payment Received - Thank You",
+    category: "Credit Card Payment",
+    amount: payAbs,
+    timestamp: ts,
+  })
+}
+
+/* =========================================================
+   10) MONTH-END ENFORCEMENT FOR CHECKING
+========================================================= */
+
+async function computeCheckingMonthTotals(uid, monthKey) {
+  const checkingRef = getAccountRef(uid, "checking")
+  await ensureAccount(checkingRef)
+
+  const startDate = `${monthKey}-01`
+  const nextMonth = (() => {
+    const p = String(monthKey).match(/^(\d{4})-(\d{2})$/)
+    if (!p) return ""
+    const y = Number(p[1])
+    const m = Number(p[2]) - 1
+    const d = new Date(Date.UTC(y, m, 1))
+    d.setUTCMonth(d.getUTCMonth() + 1)
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-01`
+  })()
+
+  let incomeAbs = 0
+  let expenseAbs = 0
+
+  let lastDoc = null
+  while (true) {
+    let q = checkingRef.collection("transactions").where("date", ">=", startDate)
+    if (nextMonth) q = q.where("date", "<", nextMonth)
+    q = q.orderBy("date", "asc").orderBy("timestamp", "asc").limit(1000)
+    if (lastDoc) q = q.startAfter(lastDoc)
+
+    const snap = await q.get()
+    if (snap.empty) break
+
+    for (const doc of snap.docs) {
+      const t = doc.data() || {}
+      const type = String(t.type || "").toLowerCase()
+      const amt = Math.abs(Number(t.amount || 0))
+      if (type === "income") incomeAbs += amt
+      else if (type === "expense") expenseAbs += amt
+    }
+
+    lastDoc = snap.docs[snap.docs.length - 1]
+    if (snap.size < 1000) break
+  }
+
+  return { income: round2(incomeAbs), expense: round2(expenseAbs) }
+}
+
+async function enforceCheckingMonthEnd(uid, monthKey, endDateStr, maxTsForDay) {
+  const checkingRef = getAccountRef(uid, "checking")
+  await ensureAccount(checkingRef)
+
+  const snap = await checkingRef.get()
+  const bal = Number((snap.data() || {}).currentBalance || 0)
+
+  const totals = await computeCheckingMonthTotals(uid, monthKey)
+  const net = round2(Number(totals.income || 0) - Number(totals.expense || 0))
+
+  let need = 0
+
+  if (net <= MONTH_NET_POSITIVE_MARGIN) {
+    need = Math.max(need, round2(MONTH_NET_POSITIVE_MARGIN - net))
+  }
+
+  if (bal < MONTH_END_MIN_BAL) {
+    need = Math.max(need, round2(MONTH_END_MIN_BAL - bal))
+  }
+
+  if (!(need > 0)) return { ok: true, adjusted: false }
+
+  const adjHour = 18
+  const adjTs = tryRandomTsInHour(endDateStr, adjHour, maxTsForDay instanceof Date ? maxTsForDay : null)
+  if (!adjTs) return { ok: true, adjusted: false, pending: true }
+
+  const id = `monthfix_${monthKey}`
+  const t = await makeTransaction(checkingRef, "system", {
+    id,
+    type: "income",
+    merchant: "Adjustment Deposit",
+    category: "Cash Deposit",
+    amount: need,
+    timestamp: adjTs,
+  })
+
+  return { ok: true, adjusted: !!(t && t.created), amount: need }
+}
+
+/* =========================================================
+   11) LIVE DAILY GENERATION (AUTO EXPENSES)
+   FINAL MODEL:
+   - Plan once per day per account (4 planned timestamps)
+   - Execute only when due (now >= planned timestamp)
+   - Lock per block to prevent duplicates
+========================================================= */
+
+async function processDayForAccount(uid, accountRef, acct, dateStr, now, isToday, plan) {
+  const blocks = Array.isArray(plan.hours) ? plan.hours : AUTO_BLOCK_STARTS
+  const done = Array.isArray(plan.doneHours) ? plan.doneHours : []
+  const planned = plan.planned && typeof plan.planned === "object" ? plan.planned : {}
+
+  for (const b of blocks) {
+    if (!AUTO_BLOCK_STARTS.includes(b)) continue
+    if (done.includes(b)) continue
+
+    const plannedRaw = planned[String(b)]
+    const plannedTs = toDateMaybe(plannedRaw)
+    if (!plannedTs) continue
+
+    if (isToday && now.getTime() < plannedTs.getTime()) continue
+
+    const reserved = await reserveHourLock(accountRef, dateStr, b)
+    if (!reserved.ok) {
+      await markHourDone(accountRef, dateStr, b)
+      continue
+    }
+
+    const suffix = `live_${dateStr}_b${pad2(b)}`
+
+    let created = false
+    try {
+      if (acct === "checking") {
+        const r = await createCheckingExpense(uid, plannedTs, suffix, "system")
+        created = !!(r && r.created)
+      } else {
+        const r = await createCreditExpense(uid, plannedTs, suffix, "system")
+        created = !!(r && r.created)
+      }
+    } catch (e) {
+      created = false
+      console.error("auto expense create error", { uid, acct, dateStr, block: b }, e)
+    }
+
+    if (!created) {
+      try {
+        await hourLockRef(accountRef, dateStr, b).delete()
+      } catch (e) {
+        console.error("auto block lock delete error", { uid, acct, dateStr, block: b }, e)
+      }
+      continue
+    }
+
+    await markHourDone(accountRef, dateStr, b)
+  }
+}
+
+async function processDayForUser(uid, dateStr, now, nowLA) {
+  const checkingRef = getAccountRef(uid, "checking")
+  const creditRef = getAccountRef(uid, "credit")
+  await ensureAccount(checkingRef)
+  await ensureAccount(creditRef)
+
+  const isToday = dateStr === nowLA.dateStr
+  const maxTsForDay = isToday ? now : null
+
+  if (isBiweeklyDate(dateStr)) {
+    if (!isToday || nowLA.hh > SALARY_TIME_H) {
+      const salaryTs = tryRandomTsInHour(dateStr, SALARY_TIME_H, maxTsForDay)
+      if (salaryTs) await applyBiweeklySalary(uid, dateStr, salaryTs)
+    } else if (nowLA.hh === SALARY_TIME_H) {
+      const salaryTs = tryRandomTsInHour(dateStr, SALARY_TIME_H, now)
+      if (salaryTs) await applyBiweeklySalary(uid, dateStr, salaryTs)
+    }
+
+    if (!isToday || nowLA.hh > CREDIT_PAYMENT_TIME_H) {
+      const payTs = tryRandomTsInHour(dateStr, CREDIT_PAYMENT_TIME_H, maxTsForDay)
+      if (payTs) await applyBiweeklyCreditPayment(uid, dateStr, payTs)
+    } else if (nowLA.hh === CREDIT_PAYMENT_TIME_H) {
+      const payTs = tryRandomTsInHour(dateStr, CREDIT_PAYMENT_TIME_H, now)
+      if (payTs) await applyBiweeklyCreditPayment(uid, dateStr, payTs)
+    }
+  }
+
+  // 1) Ensure both plans exist first.
+  let checkingPlan = await ensureDailyPlan(checkingRef, dateStr)
+  let creditPlan = await ensureDailyPlan(creditRef, dateStr)
+
+  // 2) Hard guarantee: if any block (especially 18) is missing, fill it now.
+  // This does NOT depend on "now" and does NOT reroll existing planned times.
+  const need = (plan) => {
+    const p = plan && plan.planned && typeof plan.planned === "object" ? plan.planned : {}
+    for (const b of AUTO_BLOCK_STARTS) {
+      if (!p[String(b)]) return true
+    }
+    return false
+  }
+
+  if (need(checkingPlan)) checkingPlan = await ensureDailyPlan(checkingRef, dateStr)
+  if (need(creditPlan)) creditPlan = await ensureDailyPlan(creditRef, dateStr)
+
+  // 3) Write the plan summary so you can see all 4 planned timestamps in Firebase.
+  await syncDailyAutoPlanSummary(uid, dateStr, checkingPlan, creditPlan)
+
+  // 4) Execute only when due.
+  await processDayForAccount(uid, checkingRef, "checking", dateStr, now, isToday, checkingPlan)
+  await processDayForAccount(uid, creditRef, "credit", dateStr, now, isToday, creditPlan)
+
+  // 5) Month-end enforcement remains unchanged.
+  if (isLastDayOfMonth(dateStr)) {
+    if (!isToday || nowLA.hh >= 18) {
+      const mk = monthKeyFromDateStr(dateStr)
+      await enforceCheckingMonthEnd(uid, mk, dateStr, maxTsForDay)
+    }
+  }
+
+  // 6) Refresh summary after execution WITHOUT re-planning or changing timestamps.
+  // Re-read the existing plan docs only.
+  const chkSnap = await planRef(checkingRef, dateStr).get()
+  const crSnap = await planRef(creditRef, dateStr).get()
+  const chkNow = chkSnap.exists ? chkSnap.data() || {} : checkingPlan
+  const crNow = crSnap.exists ? crSnap.data() || {} : creditPlan
+  await syncDailyAutoPlanSummary(uid, dateStr, chkNow, crNow)
+}
+
+
+async function runLiveTickForUser(uid, now) {
+  await ensureUserDoc(uid)
+
+  const nowLA = laParts(now)
+
+  const startDay = dateKeyToDayNumber(LIVE_START_DATE)
+  const todayDay = dateKeyToDayNumber(nowLA.dateStr)
+  if (!Number.isFinite(startDay) || !Number.isFinite(todayDay)) return { ok: true, skipped: true }
+  if (todayDay < startDay) return { ok: true, skipped: true }
+
+  const startTs = (() => {
+    const base = new Date(now.getTime() - 5 * 60_000)
+    const bLA = laParts(base)
+    const ts = tryRandomTsInHour(bLA.dateStr, bLA.hh, base)
+    return ts || base
+  })()
+
+  await ensureCheckingStart(uid, startTs)
+  await ensureCreditStart(uid)
+
+  const userRef = db.collection("users").doc(uid)
+  const snap = await userRef.get()
+  const d = snap.data() || {}
+
+  let fromDay = startDay
+  const lastProcessed = typeof d.liveLastDate === "string" ? d.liveLastDate : ""
+  if (lastProcessed) {
+    const lastDayNum = dateKeyToDayNumber(lastProcessed)
+    if (Number.isFinite(lastDayNum) && lastDayNum >= startDay) {
+      // If lastProcessed is yesterday, start at today.
+      // If you manually set lastProcessed to today, still start at today.
+      fromDay = Math.min(todayDay, lastDayNum + 1)
+    }
+  }
+
+  let processedDays = 0
+
+  for (let dn = fromDay; dn <= todayDay; dn++) {
+    const dateStr = dayNumberToDateKey(dn)
+    if (dn < startDay) continue
+
+    await processDayForUser(uid, dateStr, now, nowLA)
+    processedDays++
+
+    // Only mark fully completed days as "last processed"
+    if (dn < todayDay) {
+      await userRef.set({ liveLastDate: dateStr, liveLastRunAt: FieldValue.serverTimestamp() }, { merge: true })
+    }
+  }
+
+  return { ok: true, processedDays }
+}
+
+/* =========================================================
+   12) SCHEDULED TICK (EVERY HOUR)
+========================================================= */
+
+async function listAllUsers() {
+  const out = []
+  let token = undefined
+  for (let i = 0; i < 50; i++) {
+    const page = await auth.listUsers(1000, token)
+    out.push(...page.users)
+    if (!page.pageToken) break
+    token = page.pageToken
+  }
+  return out
+}
+
+exports.hourlyTick = onSchedule(
+  { schedule: "1 * * * *", timeZone: TIMEZONE, timeoutSeconds: 540 },
+  async () => {
+    const now = new Date()
+    const users = await listAllUsers()
+    let ok = 0
+    let fail = 0
+
+    for (const u of users) {
+      try {
+        await runLiveTickForUser(u.uid, now)
+        ok++
+      } catch (e) {
+        fail++
+        console.error("hourlyTick user error", u.uid, e)
+      }
+    }
+
+    console.log("hourlyTick done", { ok, fail, count: users.length })
+  }
+)
+
+/* =========================================================
+   13) MANUAL TICK ENDPOINT (FOR YOUR UI / GENERATE BUTTON)
+   - Unchanged
+========================================================= */
+
+exports.tick = onRequest({ timeoutSeconds: 60 }, async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*")
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+  if (req.method === "OPTIONS") return res.status(204).end()
+  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" })
+
+  try {
+    const idToken = (req.headers.authorization || "").replace(/^Bearer\s+/i, "")
+    if (!idToken) return res.status(401).json({ error: "Missing Bearer token" })
+
+    const decoded = await auth.verifyIdToken(idToken)
+    const uid = decoded.uid
+
+    const acct = normalizeAccount(req.query.account || "checking")
+    const accountRef = getAccountRef(uid, acct)
+
+    await ensureUserDoc(uid)
+    await ensureAccount(accountRef)
+
+    const now = new Date()
+    const dateStr = laDateKey(now)
+
+    const manualRef = accountRef.collection("manualDaily").doc(dateStr)
+
+    const reserve = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(manualRef)
+      const d = snap.exists ? snap.data() || {} : {}
+
+      const used = Number(d.count || 0)
+      if (used >= 5) {
+        return { ok: false, remaining: 0, used }
+      }
+
+      const next = used + 1
+      tx.set(
+        manualRef,
+        {
+          date: dateStr,
+          count: next,
+          updatedAt: FieldValue.serverTimestamp(),
+          createdAt: d.createdAt || FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      )
+
+      return { ok: true, remaining: Math.max(0, 5 - next), seq: next }
+    })
+
+    if (!reserve.ok) {
+      return res.status(429).json({ error: "daily_limit_reached", remaining: 0 })
+    }
+
+    const suffix = `manual_${dateStr}_${reserve.seq}`
+
+    if (acct === "checking") {
+      const r = await createCheckingExpense(uid, now, suffix, "manual")
+      if (!r || !r.created) {
+        return res.status(500).json({ error: "manual_txn_not_created", remaining: reserve.remaining })
+      }
+    } else {
+      const r = await createCreditExpense(uid, now, suffix, "manual")
+      if (!r || !r.created) {
+        return res.status(500).json({ error: "manual_txn_not_created", remaining: reserve.remaining })
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      account: acct,
+      created: true,
+      remaining: reserve.remaining,
+      timestamp: now.toISOString(),
+    })
+  } catch (e) {
+    console.error("tick error", e)
+    return res.status(500).json({ error: String(e && e.message ? e.message : e) })
+  }
+})
+
+/* =========================================================
+   14) API (FOR UI)
+========================================================= */
+
+exports.api = onRequest({ timeoutSeconds: 300 }, async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*")
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+  if (req.method === "OPTIONS") return res.status(204).end()
+
+  const normPath = String(req.path || req.url || "").split("?")[0].replace(/\/+$/, "")
+
+  try {
+    const idToken = (req.headers.authorization || "").replace(/^Bearer\s+/i, "")
+    if (!idToken) return res.status(401).json({ error: "Missing Bearer token" })
+
+    const decoded = await auth.verifyIdToken(idToken)
+    const uid = decoded.uid
+
+    await ensureUserDoc(uid)
+    await ensureAccount(getAccountRef(uid, "checking"))
+    await ensureAccount(getAccountRef(uid, "credit"))
+
+    const acct = normalizeAccount(req.query.account || "checking")
+    const accountRef = getAccountRef(uid, acct)
+    await ensureAccount(accountRef)
+
+    if (req.method === "GET" && (normPath === "/account" || normPath.endsWith("/account"))) {
+      const data = (await accountRef.get()).data() || {}
+      const user = (await db.collection("users").doc(uid).get()).data() || {}
+      return res.json({
+        account: acct,
+        accountNumber: data.accountNumber,
+        last4: String(data.accountNumber || "").slice(-4),
+        cvv: data.cvv,
+        expiry: data.expiry,
+        createdAt: data.createdAt,
+        currentBalance: Number(data.currentBalance || 0),
+        linkedToBudgetWiseAI: !!user.linkedToBudgetWiseAI,
+      })
+    }
+
+    if (req.method === "GET" && (normPath === "/transactions" || normPath.endsWith("/transactions"))) {
+      const { since } = req.query
+      const sinceMs = since ? Date.parse(String(since)) : 0
+
+      const txns = []
+      let lastDoc = null
+
+      while (txns.length < API_MAX_RETURN) {
+        let q = accountRef.collection("transactions").orderBy("timestamp", "desc").limit(API_PAGE_SIZE)
+        if (lastDoc) q = q.startAfter(lastDoc)
+
+        const snap = await q.get()
+        if (snap.empty) break
+
+        for (const doc of snap.docs) {
+          const t = doc.data() || {}
+          let tsVal
+          if (t.timestamp && typeof t.timestamp.toDate === "function") tsVal = t.timestamp.toDate()
+          else if (t.timestamp && typeof t.timestamp === "object" && Number.isFinite(t.timestamp._seconds))
+            tsVal = new Date(t.timestamp._seconds * 1000)
+          else if (t.timestamp) tsVal = new Date(t.timestamp)
+          else tsVal = new Date()
+
+          if (!sinceMs || tsVal.getTime() >= sinceMs) {
+            txns.push({ ...t, timestamp: tsVal.toISOString(), date: laDateKey(tsVal) })
+            if (txns.length >= API_MAX_RETURN) break
+          }
+        }
+
+        lastDoc = snap.docs[snap.docs.length - 1]
+        if (snap.size < API_PAGE_SIZE) break
+      }
+
+      return res.json({ account: acct, items: txns })
+    }
+
+    return res.status(404).json({ error: "Not found", path: normPath })
+  } catch (e) {
+    console.error("API error", e)
+    return res.status(500).json({ error: String(e) })
+  }
+})
+
+/* =========================================================
+   15) BUDGET-WISE LINK FLAG
+========================================================= */
+
+exports.linkBudgetWise = onRequest({ timeoutSeconds: 60 }, async (req, res) => {
+  res.set("Access-Control-Allow-Origin", "*")
+  res.set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+  if (req.method === "OPTIONS") return res.status(204).end()
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" })
+
+  try {
+    const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim()
+
+    if (!FB_API_KEY) return res.status(500).json({ error: "Server not configured: missing FB_API_KEY" })
+    if (!token || token !== FB_API_KEY) return res.status(401).json({ error: "Unauthorized" })
+
+    const uid = String((req.body && req.body.uid) || "").trim()
+    const linked = !!(req.body && req.body.linked)
+    if (!uid) return res.status(400).json({ error: "Missing uid" })
+
+    await db.collection("users").doc(uid).set(
+      { linkedToBudgetWiseAI: linked, linkedUpdatedAt: FieldValue.serverTimestamp() },
+      { merge: true }
+    )
+
+    return res.json({ ok: true, uid, linked })
+  } catch (e) {
+    console.error("linkBudgetWise error", e)
+    return res.status(500).json({ error: String(e && e.message ? e.message : e) })
+  }
+})

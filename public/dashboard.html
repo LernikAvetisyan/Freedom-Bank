@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Freedom Bank — Dashboard</title>
+
+  <!-- Favicon -->
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="alternate icon" href="/favicon.ico">
+  <meta name="theme-color" content="#3b82f6">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;900&display=swap" rel="stylesheet" />
+
+  <!-- Date picker -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+
+  <!-- Styles & Tailwind -->
+  <link rel="stylesheet" href="./styles.css?v=3" />
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Firebase -->
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script defer src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+
+  <!-- App scripts -->
+  <script defer src="./theme.js"></script>
+  <script defer src="./firebase-config.js"></script>
+  <script defer src="./dashboard.js?v=6"></script>
+</head>
+<body class="min-h-screen text-[var(--text-primary)]">
+  <!-- Header -->
+  <header class="bg-[var(--bg-secondary)] border-b border-[var(--border-color)] sticky top-0 z-10">
+    <nav class="max-w-7xl mx-auto p-4 flex justify-between items-center">
+      <div class="flex items-center gap-3">
+        <span class="text-2xl">🏦</span>
+        <h1 class="text-xl font-bold text-[var(--text-primary)]">Freedom Bank</h1>
+        <!-- Global connection badge (next to brand) -->
+        <div id="globalConnectionStatus" class="ml-2"></div>
+      </div>
+
+      <div class="flex items-center gap-4">
+        <div class="flex items-center gap-2">
+          <button id="generateBtn" class="btn btn-warning">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-11.25a.75.75 0 00-1.5 0v2.5h-2.5a.75.75 0 000 1.5h2.5v2.5a.75.75 0 001.5 0v-2.5h2.5a.75.75 0 000-1.5h-2.5v-2.5z" clip-rule="evenodd" />
+            </svg>
+            Generate
+          </button>
+          <div class="text-sm text-[var(--text-secondary)]">
+            (<span id="genCount">0/5</span>)
+            <div id="genMsg" class="text-sm"></div>
+          </div>
+        </div>
+
+        <div class="w-px h-6 bg-[var(--border-color)]"></div>
+
+        <button id="themeToggle" onclick="toggleTheme()" class="btn btn-secondary !p-2 h-10 w-10"></button>
+
+        <button id="logoutBtn" class="btn btn-secondary">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+            <path fill-rule="evenodd" d="M3 4.25A2.25 2.25 0 015.25 2h5.5A2.25 2.25 0 0113 4.25v2a.75.75 0 01-1.5 0v-2a.75.75 0 00-.75-.75h-5.5a.75.75 0 00-.75.75v11.5c0 .414.336.75.75.75h5.5a.75.75 0 00.75-.75v-2a.75.75 0 011.5 0v2A2.25 2.25 0 0110.75 18h-5.5A2.25 2.25 0 013 15.75V4.25z" clip-rule="evenodd" />
+            <path fill-rule="evenodd" d="M19 10a.75.75 0 00-.75-.75H8.704l1.048-.943a.75.75 0 10-1.004-1.114l-2.5 2.25a.75.75 0 000 1.114l2.5 2.25a.75.75 0 101.004-1.114l-1.048-.943H18.25A.75.75 0 0019 10z" clip-rule="evenodd" />
+          </svg>
+          Logout
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <main class="p-4 sm:p-6 max-w-7xl mx-auto space-y-6">
+    <!-- Top cards -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <section class="glass rounded-xl p-6">
+        <div class="flex justify-between items-center">
+          <h2 class="font-semibold text-[var(--text-secondary)]">Time until Los Angeles midnight</h2>
+          <span id="laDate" class="text-sm text-[var(--text-secondary)]"></span>
+        </div>
+        <p id="laClock" class="text-4xl font-black tracking-wider mt-2">--:--:--</p>
+        <p class="text-sm text-[var(--text-secondary)]/80 mt-2">Daily caps reset at LA midnight.</p>
+      </section>
+
+      <section class="glass rounded-xl p-6">
+        <h2 class="font-semibold text-[var(--text-secondary)] mb-1">Generated Transactions (Today)</h2>
+        <p id="todayCount" class="text-4xl font-black">0</p>
+        <p class="text-sm text-[var(--text-secondary)]/80 mt-2">Counts transactions for the selected account (LA time).</p>
+      </section>
+    </div>
+
+    <!-- Account -->
+    <section class="glass rounded-xl p-6">
+      <div class="flex items-start justify-between">
+        <div>
+          <h2 id="accountTitle" class="text-lg font-bold mb-3">Checking Account</h2>
+
+          <!-- Summary row: Balance left, Income/Expense right -->
+          <div id="accountSummary" class="account-summary">
+            <div class="account-summary-left">
+              <p id="accountBalance" class="text-xl font-extrabold text-[var(--text-primary)]">--</p>
+            </div>
+              <div class="account-summary-right">
+                <div class="summary-metric">
+                  <div class="summary-label">Income</div>
+                  <div id="summaryIncome" class="summary-value income">--</div>
+                </div>
+
+                <div class="summary-metric">
+                  <div class="summary-label">Expense</div>
+                  <div id="summaryExpense" class="summary-value expense">--</div>
+                </div>
+
+                <div class="summary-metric">
+                  <div class="summary-label">Net Change</div>
+                  <div id="summaryNet" class="summary-value net">--</div>
+                </div>
+              </div>
+          </div>
+
+          <p id="accountInfo" class="text-[var(--text-secondary)] font-mono mt-2">Loading account...</p>
+        </div>
+
+        <!-- Beautiful segmented toggle -->
+        <div class="seg-toggle" role="tablist" aria-label="Account type">
+          <button id="btnChecking" class="seg active" role="tab" aria-selected="true" data-acct="checking">Checking</button>
+          <button id="btnCredit" class="seg" role="tab" aria-selected="false" data-acct="credit">Credit Card</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Transactions -->
+    <section class="glass rounded-xl p-6">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+        <h2 class="text-lg font-bold">Recent Transactions</h2>
+
+        <div class="flex items-center gap-2 flex-wrap">
+          <!-- Start Date -->
+          <div class="relative">
+            <input id="startDatePicker" placeholder="Start date" class="input-field w-40 pl-9" />
+            <button id="startDateBtn" type="button" aria-label="Open start date calendar"
+              class="absolute inset-y-0 left-0 flex items-center pl-3">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+                class="w-5 h-5 text-[var(--text-secondary)]">
+                <path fill-rule="evenodd" d="M5.75 2a.75.75 0 01.75.75V4h7V2.75a.75.75 0 011.5 0V4h.25A2.75 2.75 0 0118 6.75v8.5A2.75 2.75 0 0115.25 18H4.75A2.75 2.75 0 012 15.25v-8.5A2.75 2.75 0 014.75 4H5V2.75A.75.75 0 015.75 2zM4.5 8.5v6.75c0 .138.112.25.25.25h10.5a.25.25 0 00.25-.25V8.5h-11z" clip-rule="evenodd" />
+              </svg>
+            </button>
+          </div>
+
+          <!-- End Date -->
+          <div class="relative">
+            <input id="endDatePicker" placeholder="End date" class="input-field w-40 pl-9" />
+            <button id="endDateBtn" type="button" aria-label="Open end date calendar"
+              class="absolute inset-y-0 left-0 flex items-center pl-3">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+                class="w-5 h-5 text-[var(--text-secondary)]">
+                <path fill-rule="evenodd" d="M5.75 2a.75.75 0 01.75.75V4h7V2.75a.75.75 0 011.5 0V4h.25A2.75 2.75 0 0118 6.75v8.5A2.75 2.75 0 0115.25 18H4.75A2.75 2.75 0 012 15.25v-8.5A2.75 2.75 0 014.75 4H5V2.75A.75.75 0 015.75 2zM4.5 8.5v6.75c0 .138.112.25.25.25h10.5a.25.25 0 00.25-.25V8.5h-11z" clip-rule="evenodd" />
+              </svg>
+            </button>
+          </div>
+
+          <!-- Search -->
+          <input id="searchBox" placeholder="Search..." class="input-field w-60" />
+
+          <!-- Clear filters -->
+          <button id="clearFiltersBtn" class="btn btn-secondary !p-2 h-10 w-10" title="Clear Filters">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5">
+              <path fill-rule="evenodd" d="M2.5 4A1.5 1.5 0 014 2.5h12A1.5 1.5 0 0117.5 4v1.616S14.375 9 10 9 2.5 5.616 2.5 5.616V4zM2.87 8.24a.75.75 0 01.9-.328l2.253.819a.75.75 0 00.9-.328l2.253-3.903a.75.75 0 011.3 0l2.253 3.903a.75.75 0 00.9.328l2.253-.819a.75.75 0 01.9.328V15.5A1.5 1.5 0 0116 17H4a1.5 1.5 0 01-1.5-1.5V8.24z" clip-rule="evenodd" />
+            </svg>
+          </button>
+
+          <!-- Refresh -->
+          <button id="refreshBtn" class="btn btn-primary">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0011.664 0l3.181-3.183m-4.991-2.696h-4.992v.001M21.015 4.356v4.992m0 0h-4.992m4.992 0l-3.181-3.183a8.25 8.25 0 00-11.664 0l-3.181 3.183" />
+            </svg>
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="transactions-table">
+          <thead>
+            <tr>
+              <th>Date / Time</th>
+              <th>Merchant</th>
+              <th>Category</th>
+              <th>Type</th>
+              <th class="text-right">Amount</th>
+            </tr>
+          </thead>
+          <tbody id="transactionsTable"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

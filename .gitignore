@@ -1,0 +1,76 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+firebase-debug*.log
+firestore-debug.log
+ui-debug.log
+
+# Firebase cache
+.firebase/
+.firebaserc.backup
+
+# Firebase config
+# Keep the real client config out of Git
+public/firebase-config.js
+
+# Optional: ignore local Firebase project config backups
+.firebaserc.local
+firebase-debug.log
+
+# Functions env and runtime config
+functions/.env
+functions/.env.*
+functions/.runtimeconfig.json
+
+# Service account keys / private keys
+*serviceAccount*.json
+*service-account*.json
+firebase-adminsdk*.json
+*.pem
+*.key
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage / test output
+coverage/
+.nyc_output/
+
+# Build / generated output
+dist/
+build/
+out/
+
+# Dependency directories
+node_modules/
+functions/node_modules/
+bower_components/
+
+# npm / yarn cache
+.npm/
+.eslintcache
+.yarn-integrity
+*.tgz
+
+# Optional REPL history
+.node_repl_history
+
+# dotenv environment variables
+.env
+.env.*
+!.env.example
+
+# dataconnect generated files
+.dataconnect/
+
+# OS / IDE junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
