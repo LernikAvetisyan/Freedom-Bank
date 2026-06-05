@@ -2,6 +2,8 @@
 
 > Firebase-based simulated banking dashboard for generating realistic checking and credit card activity for BudgetWise AI.
 
+> COMP 491/L Senior Design Project II and Lab - Spring 2026 companion application for BudgetWise AI.
+
 ![Firebase](https://img.shields.io/badge/Backend-Firebase-orange)
 ![Firestore](https://img.shields.io/badge/Database-Firestore-yellow)
 ![JavaScript](https://img.shields.io/badge/Frontend-JavaScript-blue)
