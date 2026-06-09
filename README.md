@@ -2,27 +2,51 @@
 
 > Firebase-based simulated banking dashboard for generating realistic checking and credit card activity for BudgetWise AI.
 
+> COMP 491/L Senior Design Project II and Lab - Spring 2026 companion application for BudgetWise AI.
+
 ![Firebase](https://img.shields.io/badge/Backend-Firebase-orange)
 ![Firestore](https://img.shields.io/badge/Database-Firestore-yellow)
 ![JavaScript](https://img.shields.io/badge/Frontend-JavaScript-blue)
-![Cloud Functions](https://img.shields.io/badge/API-Cloud_Functions-green)
-![Firebase Auth](https://img.shields.io/badge/Auth-Firebase_Auth-red)
+![Cloud_Functions](https://img.shields.io/badge/API-Cloud_Functions-green)
+![Firebase_Auth](https://img.shields.io/badge/Auth-Firebase_Auth-red)
+
+![Freedom Bank Checking Dashboard](screenshots/dashboard-checking-dark.png)
 
 ---
 
 ## About
 
-Freedom Bank is a simulated banking application built with Firebase Hosting, Firebase Authentication, Cloud Firestore, and Firebase Cloud Functions.
+**Freedom Bank** is a Firebase-based simulated banking application built with Firebase Hosting, Firebase Authentication, Cloud Firestore, and Firebase Cloud Functions.
 
 The project lets users create an account, sign in, view simulated checking and credit card accounts, generate realistic transaction history, and connect the simulated bank account to **BudgetWise AI**, a companion personal finance dashboard.
+
+Freedom Bank was created as a safe transaction simulator for BudgetWise AI. Instead of connecting BudgetWise AI to a real bank API, Freedom Bank generates realistic fake financial activity that can be imported, analyzed, and displayed inside the BudgetWise AI dashboard.
 
 > This is a demo banking simulator. It is not a real bank, payment processor, card issuer, or production financial platform.
 
 ---
 
-## Purpose
+## Screenshots
 
-Freedom Bank was created as a safe transaction simulator for BudgetWise AI. Instead of connecting BudgetWise AI to a real bank API, Freedom Bank generates realistic fake financial activity that can be imported, analyzed, and displayed inside the BudgetWise AI dashboard.
+### Login Page - Dark Mode
+
+![Login Page Dark Mode](screenshots/login-dark.png)
+
+### Account Creation Modal
+
+![Account Creation Modal](screenshots/signup-modal.png)
+
+### Checking Account Dashboard - Dark Mode
+
+![Checking Account Dashboard Dark Mode](screenshots/dashboard-checking-dark.png)
+
+### Credit Card Dashboard - Light Mode
+
+![Credit Card Dashboard Light Mode](screenshots/dashboard-credit-light.png)
+
+### Login Page - Light Mode
+
+![Login Page Light Mode](screenshots/login-light.png)
 
 ---
 
@@ -30,14 +54,15 @@ Freedom Bank was created as a safe transaction simulator for BudgetWise AI. Inst
 
 | Area | Features |
 |---|---|
-| Authentication | Email/password signup and login using Firebase Auth |
-| Dashboard | Checking and credit card account views |
-| Accounts | Simulated checking balance, credit debt, masked account numbers, expiry, and demo CVV display |
+| Authentication | Email/password signup and login using Firebase Authentication |
+| Dashboard | Checking and credit card account views with account switching |
+| Accounts | Simulated checking balance, credit card debt, masked account numbers, expiration dates, and demo CVV display |
 | Transactions | Generated transaction history with merchants, categories, dates, types, and amounts |
 | Manual Generation | Generate up to 5 manual transactions per account per day |
-| Scheduled Generation | Hourly Cloud Function generates simulated activity |
+| Scheduled Generation | Hourly Cloud Function generates simulated banking activity |
+| Daily Limits | Manual transaction caps reset at Los Angeles midnight |
 | Activity Types | Expenses, salary deposits, credit card spending, credit payments, ATM/top-up behavior |
-| Filtering | Search transactions, filter by date, and switch between checking/credit accounts |
+| Filtering | Search transactions, filter by start/end date, and switch between checking/credit accounts |
 | Themes | Light and dark mode support |
 | BudgetWise Sync | Link/unlink status for BudgetWise AI integration |
 
@@ -77,6 +102,13 @@ freedom-bank/
 │   ├── favicon.svg
 │   └── firebase-config.js    # Local Firebase client config, ignored by Git
 │
+├── screenshots/
+│   ├── login-dark.png
+│   ├── login-light.png
+│   ├── signup-modal.png
+│   ├── dashboard-checking-dark.png
+│   └── dashboard-credit-light.png
+│
 ├── firestore.rules
 ├── firebase.json
 ├── .firebaserc
@@ -89,12 +121,36 @@ freedom-bank/
 ## Main Application Flow
 
 1. User signs up or logs in with Firebase Authentication.
-2. The dashboard loads the user's simulated checking and credit accounts.
+2. The dashboard loads the user's simulated checking and credit card accounts.
 3. The user can switch between checking and credit card views.
 4. The app displays account balance/debt, income, expenses, net change, and recent transactions.
 5. Users can manually generate transactions, limited to 5 per account per day.
-6. Scheduled Cloud Functions generate simulated banking activity automatically.
-7. BudgetWise AI can connect to Freedom Bank and import selected account activity.
+6. Daily manual generation caps reset at Los Angeles midnight.
+7. Scheduled Cloud Functions generate simulated banking activity automatically.
+8. BudgetWise AI can connect to Freedom Bank and import selected account activity.
+
+---
+
+## Dashboard Details
+
+Freedom Bank's dashboard is designed to look and behave like a controlled banking sandbox.
+
+The dashboard includes:
+
+- Checking and credit card account toggle
+- Balance/debt overview
+- Income, expense, and net-change summaries
+- Masked account number display
+- Demo CVV and expiration date display
+- Daily generated transaction counter
+- Manual generation button
+- Daily remaining-generation limit message
+- Time remaining until Los Angeles midnight reset
+- Transaction search
+- Start/end date filters
+- Refresh control
+- Light/dark theme toggle
+- BudgetWise AI connection badge
 
 ---
 
